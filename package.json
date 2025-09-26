@@ -1,0 +1,16 @@
+{
+  "name": "image-optimizer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "npm install sharp --ignore-scripts --unsafe-perm=true"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.0.0",
+    "@google-cloud/storage": "^6.0.0",
+    "sharp": "^0.32.0"
+  }
+}
