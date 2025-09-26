@@ -23,4 +23,4 @@ ENV PORT=8080
 EXPOSE 8080
 
 # Definir el comando de inicio
-CMD ["npx", "functions-framework", "--target=optimizeImage"]
+CMD ["npx", "functions-framework", "--target=optimizeImage", "--port=8080"]
