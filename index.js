@@ -1,71 +1,84 @@
 const { Storage } = require('@google-cloud/storage');
 const sharp = require('sharp');
 const functions = require('@google-cloud/functions-framework');
-const path = require('path'); // Añadimos path por si lo necesitas, aunque no es crítico aquí.
 
 const storage = new Storage();
-
-// CLAVE: Definimos la clave de metadato que usaremos como bandera
-const OPTIMIZATION_FLAG = 'is-optimized'; 
+const OPTIMIZATION_FLAG = 'is-optimized'; // Clave de metadato personalizado
 
 functions.cloudEvent('optimizeImage', async (cloudevent) => {
-  const file = cloudevent.data;
+    const file = cloudevent.data;
+    const bucketName = file.bucket;
+    const filePath = file.name;
+    const contentType = file.contentType;
 
-  const bucketName = file.bucket;
-  const filePath = file.name;
-  const contentType = file.contentType;
+    // Instanciar el archivo
+    const originalFile = storage.bucket(bucketName).file(filePath);
 
-  // --- 1. FILTRO CLAVE: Revisar si la imagen ya tiene la bandera de optimización ---
-  // Los metadatos personalizados se incluyen en el evento, bajo la clave 'metadata'.
-  const customMetadata = file.metadata || {};
-  
-  if (customMetadata[OPTIMIZATION_FLAG] === 'true') {
-    console.log(`El archivo ${filePath} ya está marcado como optimizado. Omitiendo la ejecución.`);
-    return;
-  }
-  // ---------------------------------------------------------------------------------
+    // 1. FILTRO CLAVE: OBTENER METADATOS DIRECTAMENTE PARA ROMPER EL CICLO
+    let customMetadata = {};
+    
+    try {
+        // SOLUCIÓN: Usar getMetadata() garantiza que leemos la etiqueta MÁS RECIENTE.
+        const [metadata] = await originalFile.getMetadata();
+        
+        // La metadata personalizada siempre está en metadata.metadata
+        customMetadata = metadata.metadata || {}; 
+        
+        if (customMetadata[OPTIMIZATION_FLAG] === 'true') {
+            console.log(`[EXITO] Archivo ${filePath} ya está marcado como optimizado. Omitiendo la ejecución.`);
+            return; // ¡Rompe el ciclo!
+        }
+    } catch (error) {
+        if (error.code === 404) {
+            console.log(`[INFO] Archivo ${filePath} no encontrado, puede haber sido eliminado.`);
+            return;
+        }
+        console.error(`Error al leer metadatos de ${filePath}:`, error.message);
+        // Si no se puede leer la metadata (error 500), lanzamos el error para que GCS no asuma éxito.
+        throw error;
+    }
+    // ----------------------------------------------------------------------
 
-  if (!contentType || !contentType.startsWith('image/jpeg')) {
-    console.log(`El archivo ${filePath} no es un JPG/JPEG. Omitiendo la optimización.`);
-    return;
-  }
+    // 2. Filtro de tipo de archivo (solo JPG/JPEG).
+    if (!contentType || !contentType.startsWith('image/jpeg')) {
+        console.log(`[INFO] El archivo ${filePath} no es un JPG/JPEG. Omitiendo.`);
+        return;
+    }
 
-  const originalFile = storage.bucket(bucketName).file(filePath);
-  const tempFileId = filePath.split('/').pop();
-  const tempFilePath = `/tmp/${tempFileId}`;
+    // El resto del proceso (descarga, sharp)
+    const tempFileId = filePath.split('/').pop();
+    const tempFilePath = `/tmp/${tempFileId}`;
 
-  try {
-      // Manejo de error 404 para archivos borrados
-      await originalFile.download({ destination: tempFilePath });
-  } catch (err) {
-      if (err.code === 404) {
-          console.log(`El archivo ${filePath} no se encuentra. Terminando el reintento.`);
-          return;
-      }
-      // Reintentar si es otro error de descarga
-      throw err;
-  }
+    // Descarga
+    try {
+        await originalFile.download({ destination: tempFilePath });
+    } catch (err) {
+        console.error(`[ERROR] Falló la descarga de ${filePath}: ${err.message}`);
+        throw err;
+    }
 
-  // Proceso de optimización
-  const outputBuffer = await sharp(tempFilePath)
-    .resize({ width: 1200, withoutEnlargement: true })
-    .jpeg({ quality: 80 })
-    .toBuffer();
+    // Optimización con Sharp.
+    const outputBuffer = await sharp(tempFilePath)
+        .resize({ width: 1200, withoutEnlargement: true })
+        .jpeg({ quality: 80 })
+        .toBuffer();
 
-  // --- 2. CLAVE: Preparar las opciones de guardado con la bandera de metadato ---
-  const uploadOptions = {
-      contentType: 'image/jpeg',
-      // La metadata personalizada debe ir anidada bajo la clave 'metadata'
-      metadata: {
-          ...customMetadata, // Preserva cualquier metadata existente
-          [OPTIMIZATION_FLAG]: 'true' // Establece la bandera de procesado
-      }
-  };
-  
-  // Sobrescribe el archivo original con la imagen optimizada y la nueva metadata.
-  await originalFile.save(outputBuffer, uploadOptions);
+    // 3. Configuración de Metadatos para Guardar (Añadir la bandera)
+    const uploadOptions = {
+        contentType: 'image/jpeg',
+        metadata: {
+            metadata: {
+                ...customMetadata, // Se usa la metadata que obtuvimos en el paso 1 (que no tenía la bandera)
+                [OPTIMIZATION_FLAG]: 'true' // Marca el archivo como procesado
+            }
+        }
+    };
 
-  console.log(`Imagen ${filePath} optimizada, sobrescrita y marcada con metadatos.`);
+    // 4. Sobreescritura del archivo
+    await originalFile.save(outputBuffer, uploadOptions);
 
-  require('fs').unlinkSync(tempFilePath);
+    console.log(`[COMPLETO] Imagen ${filePath} optimizada, sobrescrita y marcada con metadatos.`);
+
+    // 5. Limpieza
+    require('fs').unlinkSync(tempFilePath);
 });
