@@ -7,18 +7,19 @@ const OPTIMIZATION_FLAG = 'is-optimized'; // Clave de metadato personalizado
 
 functions.cloudEvent('optimizeImage', async (cloudevent) => {
     const file = cloudevent.data;
+
     const bucketName = file.bucket;
     const filePath = file.name;
     const contentType = file.contentType;
 
-    // Instanciar el archivo
-    const originalFile = storage.bucket(bucketName).file(filePath);
-
+    // -----------------------------------------------------------
     // 1. FILTRO CLAVE: OBTENER METADATOS DIRECTAMENTE PARA ROMPER EL CICLO
+    // -----------------------------------------------------------
+    const originalFile = storage.bucket(bucketName).file(filePath);
     let customMetadata = {};
     
     try {
-        // SOLUCIÓN: Usar getMetadata() garantiza que leemos la etiqueta MÁS RECIENTE.
+        // Usar getMetadata() garantiza que leemos la etiqueta MÁS RECIENTE del archivo.
         const [metadata] = await originalFile.getMetadata();
         
         // La metadata personalizada siempre está en metadata.metadata
@@ -34,10 +35,9 @@ functions.cloudEvent('optimizeImage', async (cloudevent) => {
             return;
         }
         console.error(`Error al leer metadatos de ${filePath}:`, error.message);
-        // Si no se puede leer la metadata (error 500), lanzamos el error para que GCS no asuma éxito.
         throw error;
     }
-    // ----------------------------------------------------------------------
+    // -----------------------------------------------------------
 
     // 2. Filtro de tipo de archivo (solo JPG/JPEG).
     if (!contentType || !contentType.startsWith('image/jpeg')) {
@@ -45,7 +45,7 @@ functions.cloudEvent('optimizeImage', async (cloudevent) => {
         return;
     }
 
-    // El resto del proceso (descarga, sharp)
+    // Preparación para la descarga
     const tempFileId = filePath.split('/').pop();
     const tempFilePath = `/tmp/${tempFileId}`;
 
@@ -57,28 +57,41 @@ functions.cloudEvent('optimizeImage', async (cloudevent) => {
         throw err;
     }
 
-    // Optimización con Sharp.
+    // -----------------------------------------------------------
+    // 3. PROCESO DE OPTIMIZACIÓN CON SHARP (CON ROTACIÓN EXIF)
+    // -----------------------------------------------------------
     const outputBuffer = await sharp(tempFilePath)
-        .resize({ width: 1200, withoutEnlargement: true })
+        .rotate() // <--- Gira la imagen según sus metadatos EXIF (SOLUCIÓN al problema de orientación).
+        .resize({ 
+            width: 1200, 
+            height: 1200, 
+            fit: sharp.fit.inside, // Ajusta el tamaño para que quepa dentro de 1200x1200, manteniendo la proporción.
+            withoutEnlargement: true 
+        })
         .jpeg({ quality: 80 })
         .toBuffer();
+    // -----------------------------------------------------------
 
-    // 3. Configuración de Metadatos para Guardar (Añadir la bandera)
+    // 4. Configuración de Metadatos para Guardar (Añadir la bandera)
     const uploadOptions = {
         contentType: 'image/jpeg',
         metadata: {
             metadata: {
-                ...customMetadata, // Se usa la metadata que obtuvimos en el paso 1 (que no tenía la bandera)
+                ...customMetadata, // Preserva metadata existente
                 [OPTIMIZATION_FLAG]: 'true' // Marca el archivo como procesado
             }
         }
     };
 
-    // 4. Sobreescritura del archivo
+    // 5. Sobreescritura del archivo
     await originalFile.save(outputBuffer, uploadOptions);
 
     console.log(`[COMPLETO] Imagen ${filePath} optimizada, sobrescrita y marcada con metadatos.`);
 
-    // 5. Limpieza
-    require('fs').unlinkSync(tempFilePath);
+    // 6. Limpieza
+    try {
+        require('fs').unlinkSync(tempFilePath);
+    } catch (e) {
+        console.warn(`No se pudo eliminar el archivo temporal ${tempFilePath}.`, e.message);
+    }
 });
